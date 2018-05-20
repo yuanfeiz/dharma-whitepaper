@@ -208,6 +208,117 @@ Nadav Hollander -- nadav@dharma.io
 10. 债务内核将定义在债务订单中的中继节点手续费转入中继节点账户。
 
 
+债务人完成方案对于债务人希望同步地借用代币，并且每一笔交易可以是一系列更复杂交易中的一部分，这样的场景是有利的。例如，如果一个智能合约要求用户支付一定数量用于存储的代币(如FileCoin、Storj等)，为了使用它，用户可以通过上述方案获得一个有效的、已签名的债务订单来作为智能合约函数调用的一个参数。然后，智能合约可以将债务人的订单提交给债务内核，同时向债务人提供必要的存储代币，然后在同一笔交易中将其记入智能合约。这大大减少了在几乎任何情况下信用借贷情景里执行交易的摩擦成本。
+
+#### Debt Order Handshake · 债务订单握手流程
+上面提到的债务订单握手流程被正式地定义如下：
+![](https://s3-us-west-2.amazonaws.com/dharma-assets/DebtOrderHandshake-DebtorMaker.png)
+
+1. 债务人从指定的承销商处请求其承销的债务，列举他想要的贷款条件（即本金类型、期限等）。
+2. 承销商使用专有风险模型评估债务人的违约风险，构建承销商承诺(同时需要构建债务发行承诺)，将其ECDSA签名附到承销商承诺的哈希上，并将债务发行承诺、承销商承诺和ECDSA签名发送给债务人。
+3. 如果参数符合债务人的期望条件，债务人现在便拥有了所有必要的参数来构建一个完整的债务订单。但如果他希望将订单转给潜在的债权人，债务人将需要一个中继节点（主要是该节点的费用计划和地址）。
+4. 中继节点以他的费用计划和地址回应债务人的请求。
+5. 如果中继节点的费用符合债务人的意愿，债务人将使用承销商和中继节点提供的参数构建一个完整的债务订单，并将订单发送给中继节点。
+6. 中继者在他们的订单簿上列出完整的债务订单。他们挂出订单就已默认表明其接受订单上的所有参数，故其签名不是必要的。
+
+#### Debt Repayment Process · 债务偿还流程
+为了使任何债务资产的偿还状况都能得到实证评估，我们定义了一个偿还流程，在偿还流程中，还款是由偿还路由合同引导完成，整个过程将不可修改地记录在链上。
+
+当债务人希望偿还债务时，他们将执行以下操作:
+1. 债务人向代币转让代理授予转让限额(即通过ERC20 `approve` 函数)，其数额大于或等于所期望的偿还金额。
+2. 债务人将一个交易发送到还款路由合约，并附带上参数确定的所需还款金额。然后，还款路由合约将获取该债务的当前受益人的地址(即债务代币的持有者)，将所期望的还款金额从债务人的帐户转移到受益人的帐户上，并调用债务的条款合同中的 `registerRepayment` 方法登记该笔还款。
+
+注意：我们可以构建一个简单得多的方案，在这个方案中，债务人直接向债权人偿还债务，而不需要利用债务内核合约。然而，实际上有必要让对于债务内核介入到偿还过程中，以确保当一笔还款在给定的条款合同中登记时，有一笔还款交易与之对应。
+
+### Terms Contract Interface · 条款合约接口
+我们要求通过达摩协议所发行的任何债券都承诺签订一份“智能合约”，即条款合约。条款合约的作用是提供一个不可变的、程序化的、可证明的可信来源，来揭示债务的偿还状态。这使我们能够以经验和明确的方式在债务发行过程中定义还款计划，并在债务的生命周期中对债务的偿还状况进行评估。所需要的功能接口如下：
+
+```
+/// 条款合约接口
+interface TermsContract {
+     /// 登记债务人的偿还交易，并附带上一些元信息，如对美元汇率等。
+     /// @param  agreementId bytes32. The agreement id (issuance hash) of the debt agreement to which this pertains.
+     /// @param  payer address. The address of the payer.
+     /// @param  beneficiary address. The address of the payment's beneficiary.
+     /// @param  unitsOfRepayment uint. The units-of-value repaid in the transaction.
+     /// @param  tokenAddress address. The address of the token with which the repayment transaction was executed.
+    function registerRepayment(
+        bytes32 agreementId,
+        address payer,
+        address beneficiary,
+        uint256 unitsOfRepayment,
+        address tokenAddress
+    ) public returns (bool _success);
+
+    /// 一个registerRepayment的变种，将还款信息记录在NFT代币中。
+    /// to determine ex post facto the value repaid (e.g. current USD
+    /// exchange rate)
+    /// @param  agreementId bytes32. The agreement id (issuance hash) of the debt agreement to which this pertains.
+    /// @param  payer address. The address of the payer.
+    /// @param  beneficiary address. The address of the payment's beneficiary.
+    /// @param  tokenId The tokenId of the NFT transferred in the repayment transaction
+    /// @param  tokenAddress The address of the token with which the repayment transaction was executed.
+    function registerNFTRepayment(
+        bytes32 agreementId,
+        address payer,
+        address beneficiary,
+        uint256 tokenId,
+        address tokenAddress
+    ) public returns (bool _success);
+
+     /// 返回到特定区块高度时，累计需要偿还的价值单位。
+     /// 注意这不是一个常量函数，函数的返回值对于给定的区块高度也可能发生改变，因为利率可能会在交易几方间被重新协调。
+     /// @param  agreementId bytes32. The agreement id (issuance hash) of the debt agreement to which this pertains.
+     /// @param  blockNumber uint. The block number for which repayment expectation is being queried.
+     /// @return uint256 The cumulative units-of-value expected to be repaid by the time the given blockNumber lapses.
+    function getExpectedRepaymentValue(
+        bytes32 agreementId,
+        uint256 blockNumber
+    ) public view returns (uint256);
+
+     /// 返回到特定区块高度时，累计已偿还的价值单位。
+     /// @param  agreementId bytes32. The agreement id (issuance hash) of the debt agreement to which this pertains.
+     /// @param blockNumber uint. The block number for which repayment value is being queried.
+     /// @return uint256 The cumulative units-of-value repaid by the time the given blockNumber lapsed.
+    function getValueRepaid(
+        bytes32 agreementId,
+        uint256 blockNumber
+    ) public view returns (uint256);
+}
+```
+
+请注意，在`getExpectedRepaymentValue`和`getValueRepaid`函数中，还款数量被抽象地定义为了“价值单位”。
+我们有意地没有定义偿还债务的单位，这使得债券发行人有了更多的灵活性。比如说，在执行代币的实际交易时，可以用法定货币来表示预期的偿还价值。
+
+
+### 违约和收债
+达摩协议对承销商处理违约的手段和回收债务的方式不加限制。很容易想到的是，承销商可以通过利用法院来发行具有法律约束力的链下借贷协议，并通过借助法律来收回债务。当然也可以使用链上担保机制，利用某一特定债务的承诺条款合约所提供的功能，一旦当前价值偿还能力低于预期价值的偿还能力，就立即去中心化地向债权人发放抵押品。
+
+无数其他的方案可以被用来抑制违约，达摩协议不会提倡或设计任何特定的解决方案，而是旨在提供一种标准机制，通过这种机制来研究承销商对于债务资产的评级历史，以评估承销商的表现。市场应该倾向于奖励那些过去表现强劲的承销商，反之亦然。承销商过去绩效的衡量标准，我们称之为`F_β`，它借鉴了统计分析中二元分类器的评估函数，目的是为了评估承销商对违约预测的准确性：
+
+- 定义：`x` ∈ 1,...,n 是承销商评级的债务
+- 定义：`α_x` 是债务`x`合约到期时，债务人期望偿还的总价值。
+- 定义：`γ_x` 是债务`x`合约到期时，债务人实际偿还的总价值。
+- 定义：`δ_x` 是在承销商的预测中，债务`x`违约的可能性。
+- 定义：`β`为调整召回率对准确性重要程度的超参数。
+
+```
+p=∑{x}min(α_x−γ_x,δ_x*α_x)/∑{x}δ_x*α_x 
+r=∑xmin(α_x−γ_x,δ_x*α_x)/∑_x(α_x−γ_x) 
+F_β=(1+β^2)*p*r/β^2*p+r 
+```
+
+需要重点强调，这不是一个对承销商的表现进行评估时完全可靠且无所不包的度量指标。恶意欺诈的承销商可以通过各种方式(参见"攻击"小节)来博弈该指标。更确切地说，这是一个经验信号，善意的、可信的承销商可以被透明地评估。当市场上的承销商都值得信赖时，该指标将是一个非常有价值的信号。
+
+
+# 使用案例
+债务是一种非常多样化的资产类别，理论上，几乎任何类型的债务协议都可以通过达摩协议来发行和承销。
+从事任何类型法币借贷业务的在线放贷机构，都可以将他们的后台迁移到达摩协议上。他们只需在每一笔发出的交易中同时扮演债务人和承销商的角色，将本金支付转化为收据上的法币,并确保所有借款人支付和偿还均使用法币，这样便可以对用户完全隐藏那些贷款流程链上部分的复杂细节。
+我们认为，这最终将为寻求债务资本的在线贷款机构提供一个有吸引力的替代途径。
+
+
+然而，在短期内，链上债务发行的更有说服力的使用场景将是那些仅能在链上实现或因为使用了区块链而使用体验得到大大提高的场景。下面我们将重点介绍其中的几个:
+
 
 
 
