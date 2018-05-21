@@ -2,9 +2,9 @@
 
 版本 2.0
 
-Nadav Hollander -- nadav@dharma.io
+Nadav Hollander —— nadav@dharma.io（斯坦福大学2017级计算机学士）
 
-斯坦福大学2017级计算机学士
+翻译： 元飞（yuanfei at satori.works）
 
 
 ## 摘要
